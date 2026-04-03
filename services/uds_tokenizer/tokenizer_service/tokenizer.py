@@ -23,6 +23,8 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 from transformers.tokenization_utils_base import BatchEncoding
 from modelscope import snapshot_download
 from huggingface_hub import snapshot_download as hf_snapshot_download
+from huggingface_hub import try_to_load_from_cache
+from huggingface_hub.utils import LocalEntryNotFoundError
 from .exceptions import TokenizerError, ModelDownloadError, TokenizationError
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
@@ -94,6 +96,19 @@ class TokenizerService:
             logging.info(f"Using cached tokenizer from {local_model_path}")
             base_tokenizer = AutoTokenizer.from_pretrained(
                 local_model_path,
+                trust_remote_code=True,
+                padding_side="left",
+                truncation_side="left",
+                use_fast=True,
+            )
+            return base_tokenizer
+
+        # Check if the model exists in the HuggingFace cache (e.g. PVC with HF cache format).
+        # This follows vLLM's model resolution pattern using try_to_load_from_cache.
+        if self._is_in_hf_cache(model_identifier):
+            logging.info(f"Found model {model_identifier} in HuggingFace cache, loading from cache")
+            base_tokenizer = AutoTokenizer.from_pretrained(
+                model_identifier,
                 trust_remote_code=True,
                 padding_side="left",
                 truncation_side="left",
@@ -228,6 +243,24 @@ class TokenizerService:
         # If none of the above, it's likely a remote model identifier
         # containing organization/model format
         return "/" in model_identifier
+
+    @staticmethod
+    def _is_in_hf_cache(model_identifier: str) -> bool:
+        """Check if a model's config file exists in the HuggingFace local cache.
+
+        Follows vLLM's model resolution pattern: uses try_to_load_from_cache
+        to check if the model files are available in the HF cache directory
+        (set via HF_HUB_CACHE). This supports PVCs mounted with HuggingFace
+        cache-system format (blobs/snapshots/refs structure).
+        """
+        try:
+            result = try_to_load_from_cache(
+                repo_id=model_identifier,
+                filename="config.json",
+            )
+            return isinstance(result, str)
+        except (LocalEntryNotFoundError, Exception):
+            return False
 
     def load_tokenizer(
         self,
